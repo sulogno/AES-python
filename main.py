@@ -40,19 +40,11 @@ INV_SBOX = [
 
 RCON = [0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36]
 
-# ================= AES CORE FUNCTIONS ==================
+# 1. OPTIMIZATION: Precomputed XTIME table for multiplication by 2 in GF(2^8)
+# This eliminates the need for the bitwise loop in gmul(a, 2).
+XTIME = [(b << 1) ^ 0x1B if b & 0x80 else b << 1 for b in range(256)]
 
-def gmul(a, b):
-    p = 0
-    for _ in range(8):
-        if b & 1:
-            p ^= a
-        hi = a & 0x80
-        a = (a << 1) & 0xFF
-        if hi:
-            a ^= 0x1B
-        b >>= 1
-    return p
+# ================= AES CORE FUNCTIONS ==================
 
 def sub_bytes(state):       return [SBOX[b] for b in state]
 def inv_sub_bytes(state):   return [INV_SBOX[b] for b in state]
@@ -63,27 +55,38 @@ def shift_rows(s):
 def inv_shift_rows(s):
     return [s[0],s[13],s[10],s[7], s[4],s[1],s[14],s[11], s[8],s[5],s[2],s[15], s[12],s[9],s[6],s[3]]
 
+# 2. OPTIMIZATION: Advanced MixColumns using shared XOR sums
 def mix_columns(s):
-    r=[]
-    for i in range(0,16,4):
-        a=s[i:i+4]
-        r+=[
-            gmul(a[0],2)^gmul(a[1],3)^a[2]^a[3],
-            a[0]^gmul(a[1],2)^gmul(a[2],3)^a[3],
-            a[0]^a[1]^gmul(a[2],2)^gmul(a[3],3),
-            gmul(a[0],3)^a[1]^a[2]^gmul(a[3],2)
-        ]
+    r = []
+    for i in range(0, 16, 4):
+        a = s[i:i+4]
+        # Algebraic optimization: (2*a0 ^ 3*a1 ^ a2 ^ a3) 
+        # can be simplified to reduce total XOR operations.
+        t = a[0] ^ a[1] ^ a[2] ^ a[3]
+        u = a[0]
+        c0 = a[0] ^ t ^ XTIME[a[0] ^ a[1]]
+        c1 = a[1] ^ t ^ XTIME[a[1] ^ a[2]]
+        c2 = a[2] ^ t ^ XTIME[a[2] ^ a[3]]
+        c3 = a[3] ^ t ^ XTIME[a[3] ^ u]
+        r.extend([c0, c1, c2, c3])
     return r
 
+# 3. OPTIMIZATION: Advanced Inverse MixColumns using XTIME Lookups
 def inv_mix_columns(s):
-    r=[]
-    for i in range(0,16,4):
-        a=s[i:i+4]
-        r+=[
-            gmul(a[0],14)^gmul(a[1],11)^gmul(a[2],13)^gmul(a[3],9),
-            gmul(a[0],9)^gmul(a[1],14)^gmul(a[2],11)^gmul(a[3],13),
-            gmul(a[0],13)^gmul(a[1],9)^gmul(a[2],14)^gmul(a[3],11),
-            gmul(a[0],11)^gmul(a[1],13)^gmul(a[2],9)^gmul(a[3],14)
+    r = []
+    for i in range(0, 16, 4):
+        a = s[i:i+4]
+        # Instead of generic gmul, we use precomputed XTIME multiples
+        def mul_9(x):  return XTIME[XTIME[XTIME[x]]] ^ x
+        def mul_11(x): return XTIME[XTIME[XTIME[x]]] ^ XTIME[x] ^ x
+        def mul_13(x): return XTIME[XTIME[XTIME[x]]] ^ XTIME[XTIME[x]] ^ x
+        def mul_14(x): return XTIME[XTIME[XTIME[x]]] ^ XTIME[XTIME[x]] ^ XTIME[x]
+        
+        r += [
+            mul_14(a[0]) ^ mul_11(a[1]) ^ mul_13(a[2]) ^ mul_9(a[3]),
+            mul_9(a[0])  ^ mul_14(a[1]) ^ mul_11(a[2]) ^ mul_13(a[3]),
+            mul_13(a[0]) ^ mul_9(a[1])  ^ mul_14(a[2]) ^ mul_11(a[3]),
+            mul_11(a[0]) ^ mul_13(a[1]) ^ mul_9(a[2])  ^ mul_14(a[3])
         ]
     return r
 
@@ -106,7 +109,6 @@ def key_expansion(key):
 # ================= AES ENCRYPT / DECRYPT ==================
 
 def aes_encrypt(pt,key):
-    if len(pt)!=16: raise ValueError("Plaintext must be 16 bytes")
     k=key_expansion(key)
     s=add_round_key(list(pt),k[0])
     for r in range(1,10):
@@ -119,7 +121,6 @@ def aes_encrypt(pt,key):
     return bytes(add_round_key(s,k[10]))
 
 def aes_decrypt(ct,key):
-    if len(ct)!=16: raise ValueError("Ciphertext must be 16 bytes")
     k=key_expansion(key)
     s=add_round_key(list(ct),k[10])
     for r in range(9,0,-1):
@@ -138,7 +139,7 @@ if __name__=="__main__":
     key=b"thisis128bitkey!"
 
     ct=aes_encrypt(pt,key)
-    print("Ciphertext:",ct.hex())
+    print("Ciphertext:", ct.hex())
 
     dec=aes_decrypt(ct,key)
-    print("Decrypted :",dec)
+    print("Decrypted :", dec)
