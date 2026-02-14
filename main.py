@@ -1,3 +1,5 @@
+import matplotlib.pyplot as plt
+
 # ================= AES TABLES ==================
 
 SBOX = [
@@ -15,7 +17,7 @@ SBOX = [
     0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
     0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
     0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
-    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xCE,0x55,0x28,0xdf,
     0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
 ]
 
@@ -39,15 +41,23 @@ INV_SBOX = [
 ]
 
 RCON = [0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36]
-
-# 1. OPTIMIZATION: Precomputed XTIME table for multiplication by 2 in GF(2^8)
-# This eliminates the need for the bitwise loop in gmul(a, 2).
 XTIME = [(b << 1) ^ 0x1B if b & 0x80 else b << 1 for b in range(256)]
+
+# ================= LEAKAGE SIMULATION HELPERS ==================
+
+def get_hamming_weight(n):
+    return bin(n & 0xFF).count('1')
+
+def capture_hw_leakage(state):
+    return [get_hamming_weight(b) for b in state]
 
 # ================= AES CORE FUNCTIONS ==================
 
-def sub_bytes(state):       return [SBOX[b] for b in state]
-def inv_sub_bytes(state):   return [INV_SBOX[b] for b in state]
+def sub_bytes(state):
+    return [SBOX[b & 0xFF] for b in state]
+
+def inv_sub_bytes(state):
+    return [INV_SBOX[b & 0xFF] for b in state]
 
 def shift_rows(s):
     return [s[0],s[5],s[10],s[15], s[4],s[9],s[14],s[3], s[8],s[13],s[2],s[7], s[12],s[1],s[6],s[11]]
@@ -55,91 +65,135 @@ def shift_rows(s):
 def inv_shift_rows(s):
     return [s[0],s[13],s[10],s[7], s[4],s[1],s[14],s[11], s[8],s[5],s[2],s[15], s[12],s[9],s[6],s[3]]
 
-# 2. OPTIMIZATION: Advanced MixColumns using shared XOR sums
 def mix_columns(s):
     r = []
     for i in range(0, 16, 4):
         a = s[i:i+4]
-        # Algebraic optimization: (2*a0 ^ 3*a1 ^ a2 ^ a3) 
-        # can be simplified to reduce total XOR operations.
         t = a[0] ^ a[1] ^ a[2] ^ a[3]
         u = a[0]
         c0 = a[0] ^ t ^ XTIME[a[0] ^ a[1]]
         c1 = a[1] ^ t ^ XTIME[a[1] ^ a[2]]
         c2 = a[2] ^ t ^ XTIME[a[2] ^ a[3]]
         c3 = a[3] ^ t ^ XTIME[a[3] ^ u]
-        r.extend([c0, c1, c2, c3])
+        r.extend([c0 & 0xFF, c1 & 0xFF, c2 & 0xFF, c3 & 0xFF])
     return r
 
-# 3. OPTIMIZATION: Advanced Inverse MixColumns using XTIME Lookups
 def inv_mix_columns(s):
     r = []
     for i in range(0, 16, 4):
         a = s[i:i+4]
-        # Instead of generic gmul, we use precomputed XTIME multiples
-        def mul_9(x):  return XTIME[XTIME[XTIME[x]]] ^ x
-        def mul_11(x): return XTIME[XTIME[XTIME[x]]] ^ XTIME[x] ^ x
-        def mul_13(x): return XTIME[XTIME[XTIME[x]]] ^ XTIME[XTIME[x]] ^ x
-        def mul_14(x): return XTIME[XTIME[XTIME[x]]] ^ XTIME[XTIME[x]] ^ XTIME[x]
-        
+        def xt(x): return XTIME[x & 0xFF]
+        def mul_9(x):  return xt(xt(xt(x))) ^ x
+        def mul_11(x): return xt(xt(xt(x))) ^ xt(x) ^ x
+        def mul_13(x): return xt(xt(xt(x))) ^ xt(xt(x)) ^ x
+        def mul_14(x): return xt(xt(xt(x))) ^ xt(xt(x)) ^ xt(x)
         r += [
-            mul_14(a[0]) ^ mul_11(a[1]) ^ mul_13(a[2]) ^ mul_9(a[3]),
-            mul_9(a[0])  ^ mul_14(a[1]) ^ mul_11(a[2]) ^ mul_13(a[3]),
-            mul_13(a[0]) ^ mul_9(a[1])  ^ mul_14(a[2]) ^ mul_11(a[3]),
-            mul_11(a[0]) ^ mul_13(a[1]) ^ mul_9(a[2])  ^ mul_14(a[3])
+            (mul_14(a[0]) ^ mul_11(a[1]) ^ mul_13(a[2]) ^ mul_9(a[3])) & 0xFF,
+            (mul_9(a[0])  ^ mul_14(a[1]) ^ mul_11(a[2]) ^ mul_13(a[3])) & 0xFF,
+            (mul_13(a[0]) ^ mul_9(a[1])  ^ mul_14(a[2]) ^ mul_11(a[3])) & 0xFF,
+            (mul_11(a[0]) ^ mul_13(a[1]) ^ mul_9(a[2])  ^ mul_14(a[3])) & 0xFF
         ]
     return r
 
-def add_round_key(s,k): return [a^b for a,b in zip(s,k)]
+def add_round_key(s, k):
+    return [(a ^ b) & 0xFF for a, b in zip(s, k)]
 
 # ================= KEY EXPANSION ==================
 
 def key_expansion(key):
-    if len(key)!=16: raise ValueError("Key must be 16 bytes")
-    w=list(key)
-    for i in range(16,176,4):
-        t=w[i-4:i]
-        if i%16==0:
-            t=t[1:]+t[:1]
-            t=[SBOX[b] for b in t]
-            t[0]^=RCON[(i//16)-1]
-        w+=[w[i-16+j]^t[j] for j in range(4)]
-    return [w[i:i+16] for i in range(0,176,16)]
+    if len(key) != 16: raise ValueError("Key must be 16 bytes")
+    w = list(key)
+    for i in range(16, 176, 4):
+        t = w[i-4:i]
+        if i % 16 == 0:
+            t = t[1:] + t[:1]
+            t = [SBOX[b & 0xFF] for b in t]
+            t[0] ^= RCON[(i // 16) - 1]
+        w += [(w[i-16+j] ^ t[j]) & 0xFF for j in range(4)]
+    return [w[i:i+16] for i in range(0, 176, 16)]
 
 # ================= AES ENCRYPT / DECRYPT ==================
 
-def aes_encrypt(pt,key):
-    k=key_expansion(key)
-    s=add_round_key(list(pt),k[0])
-    for r in range(1,10):
-        s=sub_bytes(s)
-        s=shift_rows(s)
-        s=mix_columns(s)
-        s=add_round_key(s,k[r])
-    s=sub_bytes(s)
-    s=shift_rows(s)
-    return bytes(add_round_key(s,k[10]))
+def aes_encrypt_simulated(pt, key):
+    k = key_expansion(key)
+    leakage_traces = []
+    s = add_round_key(list(pt), k[0])
+    for r in range(1, 10):
+        s = sub_bytes(s)
+        leakage_traces.append(capture_hw_leakage(s)) 
+        s = shift_rows(s)
+        s = mix_columns(s)
+        s = add_round_key(s, k[r])
+    s = sub_bytes(s)
+    leakage_traces.append(capture_hw_leakage(s))
+    s = shift_rows(s)
+    ct = bytes(add_round_key(s, k[10]))
+    return ct, leakage_traces
 
-def aes_decrypt(ct,key):
-    k=key_expansion(key)
-    s=add_round_key(list(ct),k[10])
-    for r in range(9,0,-1):
-        s=inv_shift_rows(s)
-        s=inv_sub_bytes(s)
-        s=add_round_key(s,k[r])
-        s=inv_mix_columns(s)
-    s=inv_shift_rows(s)
-    s=inv_sub_bytes(s)
-    return bytes(add_round_key(s,k[0]))
+def aes_decrypt(ct, key):
+    k = key_expansion(key)
+    s = add_round_key(list(ct), k[10])
+    for r in range(9, 0, -1):
+        s = inv_shift_rows(s)
+        s = inv_sub_bytes(s)
+        s = add_round_key(s, k[r])
+        s = inv_mix_columns(s)
+    s = inv_shift_rows(s)
+    s = inv_sub_bytes(s)
+    return bytes(add_round_key(s, k[0]))
 
-# ================= TEST ==================
+def print_terminal_trace(traces):
+    """Prints a text-based bar chart of Hamming Weights to the terminal."""
+    print("\n--- Terminal Power Trace Visualization (Hamming Weight) ---")
+    print("Byte Index | HW | Visualization")
+    print("-" * 45)
+    
+    full_trace = [hw for round_leak in traces for hw in round_leak]
+    
+    for i, hw in enumerate(full_trace):
+        # Add a separator for each AES Round (every 16 bytes)
+        if i > 0 and i % 16 == 0:
+            print("-" * 20 + f" Round {i//16 + 1} " + "-" * 13)
+        
+        # Create a bar using block characters
+        bar = "█" * hw
+        # Color coding logic (optional, works in most modern terminals)
+        # 0-3: Low (Green-ish), 4-5: Mid (Yellow-ish), 6-8: High (Red-ish)
+        print(f"{i:03d}        | {hw}  | {bar}")
 
-if __name__=="__main__":
-    pt=b"Attack at dawn!!"
-    key=b"thisis128bitkey!"
+# ================= TEST & GRAPH ==================
+if __name__ == "__main__":
+    pt = b"Attack at dawn!!"
+    key = b"thisis128bitkey!"
 
-    ct=aes_encrypt(pt,key)
-    print("Ciphertext:", ct.hex())
+    print("--- AES Side-Channel Simulation ---")
+    ct, traces = aes_encrypt_simulated(pt, key)
+    print("Ciphertext (hex):", ct.hex())
+    
+    # 1. NEW: Show the trace in the terminal
+    print_terminal_trace(traces)
 
-    dec=aes_decrypt(ct,key)
-    print("Decrypted :", dec)
+    # 2. Flatten the traces for the existing Matplotlib plot
+    full_trace = [hw for round_leak in traces for hw in round_leak]
+
+    # 3. Setup the plot (Optional: Keep this if you still want the PNG)
+    plt.figure(figsize=(10, 5))
+    plt.plot(full_trace, label='Power (Hamming Weight)', color='blue')
+    
+    for i in range(1, 11):
+        plt.axvline(x=i*16, color='red', linestyle='--', alpha=0.3)
+        plt.text(i*16-8, 8.5, f"R{i}", color='red', fontsize=8, ha='center')
+
+    plt.title("AES Simulated Power Leakage Trace")
+    plt.xlabel("Operation Sequence (Bytes through S-Box)")
+    plt.ylabel("Hamming Weight")
+    plt.ylim(0, 10)
+    plt.grid(True, alpha=0.2)
+    plt.legend()
+
+    plt.savefig("aes_power_trace.png")
+    print("\nGraph also saved as 'aes_power_trace.png'")
+    
+    # Verify Decryption
+    dec = aes_decrypt(ct, key)
+    print("Decrypted String:", dec.decode())
