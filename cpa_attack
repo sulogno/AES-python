@@ -1,0 +1,148 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import secrets
+
+# ================= HARDCODED KEY ==================
+SECRET_KEY = b"hhisis128bitkey!" 
+
+# ================= AES TABLES ==================
+SBOX = [
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xCE,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+]
+
+RCON = [0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36]
+XTIME = [(b << 1) ^ 0x1B if b & 0x80 else b << 1 for b in range(256)]
+
+# ================= LEAKAGE SIMULATION HELPERS ==================
+
+def get_hamming_weight(n):
+    return bin(n & 0xFF).count('1')
+
+def capture_hw_leakage(state):
+    return [get_hamming_weight(b) for b in state]
+
+# ================= AES CORE FUNCTIONS ==================
+
+def sub_bytes(state):
+    return [SBOX[b & 0xFF] for b in state]
+
+def add_round_key(s, k):
+    return [(a ^ b) & 0xFF for a, b in zip(s, k)]
+
+def shift_rows(s):
+    return [s[0],s[5],s[10],s[15], s[4],s[9],s[14],s[3], s[8],s[13],s[2],s[7], s[12],s[1],s[6],s[11]]
+
+def mix_columns(s):
+    r = []
+    for i in range(0, 16, 4):
+        a = s[i:i+4]
+        t = a[0] ^ a[1] ^ a[2] ^ a[3]
+        u = a[0]
+        c0 = a[0] ^ t ^ XTIME[a[0] ^ a[1]]
+        c1 = a[1] ^ t ^ XTIME[a[1] ^ a[2]]
+        c2 = a[2] ^ t ^ XTIME[a[2] ^ a[3]]
+        c3 = a[3] ^ t ^ XTIME[a[3] ^ u]
+        r.extend([c0 & 0xFF, c1 & 0xFF, c2 & 0xFF, c3 & 0xFF])
+    return r
+
+def key_expansion(key):
+    w = list(key)
+    for i in range(16, 176, 4):
+        t = w[i-4:i]
+        if i % 16 == 0:
+            t = t[1:] + t[:1]
+            t = [SBOX[b & 0xFF] for b in t]
+            t[0] ^= RCON[(i // 16) - 1]
+        w += [(w[i-16+j] ^ t[j]) & 0xFF for j in range(4)]
+    return [w[i:i+16] for i in range(0, 176, 16)]
+
+def aes_encrypt_simulated(pt, key):
+    k = key_expansion(key)
+    leakage_traces = []
+    s = add_round_key(list(pt), k[0])
+    for r in range(1, 10):
+        s = sub_bytes(s)
+        leakage_traces.append(capture_hw_leakage(s)) 
+        s = shift_rows(s)
+        s = mix_columns(s)
+        s = add_round_key(s, k[r])
+    s = sub_bytes(s)
+    leakage_traces.append(capture_hw_leakage(s))
+    return bytes(s), leakage_traces
+
+# ================= FULL CPA ATTACK FUNCTION ==================
+
+def perform_full_cpa_attack(plaintexts, observed_leakages):
+    print("\n--- Starting Full 128-bit CPA Attack ---")
+    guessed_key = []
+
+    # Loop through all 16 bytes of the key
+    for byte_index in range(16):
+        correlations = []
+        
+        for k_guess in range(256):
+            hypothetical_hws = []
+            for i in range(len(plaintexts)):
+                # Target the specific byte index for plaintext and leakage
+                p_byte = plaintexts[i][byte_index]
+                intermediate = SBOX[p_byte ^ k_guess]
+                hypothetical_hws.append(get_hamming_weight(intermediate))
+            
+            # The actual leakage for this byte position across all traces
+            real_leakage = [trace[byte_index] for trace in observed_leakages]
+            
+            if np.std(hypothetical_hws) == 0:
+                correlations.append(0)
+            else:
+                corr = np.corrcoef(hypothetical_hws, real_leakage)[0, 1]
+                correlations.append(abs(corr))
+
+        best_guess = np.argmax(correlations)
+        guessed_key.append(best_guess)
+        print(f"Byte {byte_index:02d} Recovered: {hex(best_guess)} ('{chr(best_guess)}')")
+
+    return bytes(guessed_key)
+
+# ================= EXECUTION ==================
+
+if __name__ == "__main__":
+    num_traces = 100 
+    all_pts = []
+    all_leakages = []
+
+    print(f"Generating {num_traces} simulated power traces...")
+    print(f"Secret Key: {SECRET_KEY.decode('ascii', errors='ignore')}")
+
+    for _ in range(num_traces):
+        rand_pt = secrets.token_bytes(16)
+        _, traces = aes_encrypt_simulated(rand_pt, SECRET_KEY)
+        all_pts.append(rand_pt)
+        # Capture the full 16-byte leakage from Round 1
+        all_leakages.append(traces[0]) 
+
+    recovered_key = perform_full_cpa_attack(all_pts, all_leakages)
+
+    print("-" * 50)
+    print(f"REAL KEY     : {SECRET_KEY}")
+    print(f"RECOVERED KEY: {recovered_key}")
+    print("-" * 50)
+
+    if SECRET_KEY == recovered_key:
+        print("SUCCESS: The entire 128-bit key was recovered!")
+    else:
+        print("FAILURE: Full key recovery failed.")
